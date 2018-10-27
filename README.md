@@ -4,7 +4,7 @@ Pagerduty2Postgres imports data from the PagerDuty API into a Postgres database 
 This is an almost identical copy of Stripe's amazing [pd2pg](https://github.com/stripe/pd2pg) solution. Unfortunately, they wrote it in Ruby (yikes) and thus it's undeployable as AWS Lambda (yet?). Also Go is amazing.
 
 This app is designed to be run on AWS Lambda service, is written in GO and deployed as a single binary.
-Cloudformationd deployment code included in this repo.
+Cloudformation deployment code is included in this repo.
 
 ### Main features
 - Collect summary statistics about on-call activity.
