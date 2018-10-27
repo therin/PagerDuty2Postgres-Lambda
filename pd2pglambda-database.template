@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: PagerDuty2Postgres RDS database
+Parameters:
+    DBInstanceIdentifier:
+        Default: pagerduty-reporting
+        Description: Specify a name that is unique for all DB instances.
+        Type: String
+    KMSKeyId:
+        Type: String
+        Description: 'Required value. ARN of the KMS Key to be used for encryption.
+    Username:
+        Description: 'The database admin account username. NOTE: if Snapshot ID is
+            provided, this value will be ignored and will inherit the value from snapshot.'
+        Type: String
+    DatabaseName:
+        Default: pagerduty
+        Description: Name of the database to store data in
+        Type: String
+    Password:
+        NoEcho: 'true'
+        Description: The database admin account password
+        Type: String
+        MinLength: '8'
+        MaxLength: '41'
+    DBSubnetGroupSubnets:
+        Type: CommaDelimitedList
+        Description: List of subnets to include in RDS subnet group
+    EnvironmentContainer:
+        Type: String
+    EnvironmentContainer:
+        Type: String
+    VpcId:
+        Type: AWS::EC2::VPC::Id
+        Description: The VPC that the lambda function will execute within.
+
+Resources:
+    PagerDutyLambdaDatabase:
+        Type: AWS::RDS::DBInstance
+        Properties:
+            DBInstanceIdentifier:
+                Fn::Join:
+                - '-'
+                -   - infra
+                    -   !Ref EnvironmentContainer
+                    -   !Ref DBInstanceIdentifier
+            DBName: !Ref DatabaseName
+            AllocatedStorage: 20
+            BackupRetentionPeriod: 7
+            CopyTagsToSnapshot: 'true'
+            DBInstanceClass: db.t2.small
+            Engine: postgres
+            EngineVersion: 10.3
+            MasterUsername: !Ref Username
+            MasterUserPassword: !Ref Password
+            DBSubnetGroupName: !Ref PagerDutyLambdaSubnetGroup
+            VPCSecurityGroups:
+              - !Ref PagerDutyLambdaSecurityGroup
+            PubliclyAccessible: 'false'
+            KmsKeyId: !Ref KMSKeyId
+            StorageEncrypted: 'true'
+            StorageType: gp2
+            MultiAZ: 'true'
+            PreferredBackupWindow: 00:00-00:30
+            Tags:
+            -   Key: Name
+                Value:
+                    Fn::Join:
+                    - '-'
+                    -   - infra
+                        -   !Ref EnvironmentContainer
+                        -   !Ref DBInstanceIdentifier
+        DeletionPolicy: Snapshot
+    PagerDutyLambdaSubnetGroup:
+        Type: AWS::RDS::DBSubnetGroup
+        Properties:
+          DBSubnetGroupDescription: Subnet group for PagerDuty2Postgres RDS instance
+          DBSubnetGroupName: infra-pagerduty-lambda-group
+          SubnetIds: !Ref DBSubnetGroupSubnets
+          Tags:
+            -   Key: Name
+                Value:
+                    Fn::Join:
+                    - '-'
+                    -   - infra
+                        - !Ref EnvironmentContainer
+                        - !Ref DBInstanceIdentifier
+                        - SubnetGroup
+    PagerDutyLambdaSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+          GroupDescription: Control access to Postgresql RDS instances for PagerDuty Reporting Lambda.
+          SecurityGroupIngress:
+          -
+            IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+          VpcId: !Ref VpcId
+          Tags:
+            -   Key: Name
+                Value:
+                    Fn::Join:
+                    - '-'
+                        - infra
+                        - !Ref EnvironmentContainer
+                        - !Ref DBInstanceIdentifier
+                        - SecurityGroup
+
+Outputs:
+    ConnectionEndpoint:
+        Description: Connection endpoint and port for the database
+        Value:
+            Fn::Join:
+            - ':'
+            -   -   Fn::GetAtt:
+                    - PagerDutyLambdaDatabase
+                    - Endpoint.Address
+                -   Fn::GetAtt:
+                    - PagerDutyLambdaDatabase
+                    - Endpoint.Port

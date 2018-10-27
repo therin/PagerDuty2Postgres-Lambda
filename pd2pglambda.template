@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda to import PagerDuty data into Postgres for analysis
+
+Parameters:
+  PagerDutySubdomain:
+    Type: String
+    Description: your-company in your-company.pagerduty.com
+  PagerDutyApiKey:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Description: PagerDuty Reporting API key stored in parameter store
+    Default: PD2PGLambdaPagerDutyAPIKey
+    NoEcho: 'True'
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 Bucket where Lambda package is stored
+  LambdaS3Key:
+    Type: String
+    Description: S3 key to Lambda package
+    Default: pagerduty2postgresSrc
+  DatabaseEndpoint:
+    Type: String
+    Description: Hostname of Postgres DB to ingest data to e.g. postgres://127.0.0.1:5432/pagerduty
+  DatabaseName:
+    Type: String
+    Description: Name of the database to store data in
+    Default: pagerduty
+  DatabaseUserName:
+    Type: String
+    Description: Username to connect to database
+  DatabasePasswordParameterName:
+    Type: String
+    Description: SSM Parameter Store name for database connection password parameter
+  PaginationLimit:
+    Type: String
+    Description: Largest page size allowed
+    Default: 25
+  IncrementalBuffer:
+    Type: String
+    Description: Rewind by ~1h when doing incremental updates, to ensure we don't miss anything
+    Default: 3600
+  IncrementalWindow:
+    Type: String
+    Description: Apply incremental updates atomically for ~24 hour windows, instead of trying to fetch all of history and apply it at once
+    Default: 86400
+  PagerDutyEpoch:
+    Type: String
+    Description: Earliest time PagerDuty data could be available.
+    Default: 2017-01-01T00:00:00Z
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC that the lambda function will execute within.
+  ApplicationSubnets:
+    Type: CommaDelimitedList
+    Description: The Application Subnets for the lambda function to reside under
+  packageVersion:
+    Type: String
+    Description: The automation package file version number
+
+Resources:
+  lambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            -   Effect: Allow
+                Principal:
+                    Service:
+                    - lambda.amazonaws.com
+                    - events.amazonaws.com
+                Action:
+                - sts:AssumeRole
+        Path: /
+        Policies:
+        -   PolicyName: infra-pagerduty-2-rds-lambda-logs
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                -   Effect: Allow
+                    Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                    Resource:
+                    - arn:aws:logs:*:*:log-group:/aws/lambda/pagerduty-2-rds-lambda:*:*
+        -   PolicyName: infra-pagerduty-2-rds-lambda-logs-sns
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                -   Action:
+                    - sns:Publish
+                    - sns:Subscribe
+                    Effect: Allow
+                    Resource: arn:aws:sns:*:*:*
+        -   PolicyName: infra-pagerduty-2-rds-lambda-vpc
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                -   Action:
+                    - ec2:DescribeNetworkInterfaces
+                    - ec2:CreateNetworkInterface
+                    - ec2:DeleteNetworkInterface
+                    Effect: Allow
+                    Resource: '*'
+        -   PolicyName: infra-pagerduty-2-rds-lambda-ssm
+            PolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                -   Action:
+                    - ssm:GetParameters
+                    - ssm:DescribeParameters
+                    Effect: Allow
+                    Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*"
+        RoleName: infra-pagerduty-2-rds-lambda-role
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for PagerDuty2Postgres Lambda
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '-1'
+        ToPort: '-1'
+        IpProtocol: '-1'
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '-1'
+        ToPort: '-1'
+        IpProtocol: '-1'
+      VpcId: !Ref VPCId
+      Tags:
+      -
+        Key: Name
+        Value: 'infra-PagerDuty2RDSLambda'
+
+  PagerDutyToPostgresLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Sub ${LambdaS3Key}_${packageVersion}.zip
+      Description: Import PagerDuty data into Postgres for analysis
+      FunctionName: pagerduty-2-rds-lambda
+      Environment:
+        Variables:
+          PAGERDUTY_SUBDOMAIN: !Ref PagerDutySubdomain
+          PAGERDUTY_API_KEY: !Ref PagerDutyApiKey
+          DATABASE_URL: !Ref DatabaseEndpoint
+          DATABASE_NAME: !Ref DatabaseName
+          DATABASE_USER_NAME: !Ref DatabaseUserName
+          DATABASE_PASSWORD_PARAMETER: !Ref DatabasePasswordParameterName
+          PAGINATION_LIMIT: !Ref PaginationLimit
+          INCREMENTAL_BUFFER: !Ref IncrementalBuffer
+          INCREMENTAL_WINDOW: !Ref IncrementalWindow
+          PAGERDUTY_EPOCH: !Ref PagerDutyEpoch
+      Handler: main
+      Role: !GetAtt lambdaRole.Arn
+      Runtime: go1.x
+      Timeout: 300
+      VpcConfig:
+        SecurityGroupIds:
+        - !GetAtt SecurityGroup.GroupId
+        SubnetIds: !Ref ApplicationSubnets
+      Tags:
+        -   Key: Name
+            Value: Import PagerDuty data into Postgres for analysis
+
+  lambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+        Action: lambda:InvokeFunction
+        Principal: events.amazonaws.com
+        SourceArn: !GetAtt lambdaInvokeEvent.Arn
+        FunctionName: !GetAtt PagerDutyToPostgresLambda.Arn
+
+  lambdaInvokeEvent:
+      Type: AWS::Events::Rule
+      Properties:
+        Description: Event to invoke PagerDutyToPostgresLambda
+        Name: PagerDutyToPostgresLambdaInvokeEvent
+        ScheduleExpression: "rate(1 day)"
+        State: ENABLED
+        RoleArn:
+          Fn::GetAtt:
+            - lambdaRole
+            - Arn
+        Targets:
+          -
+            Arn:
+              Fn::GetAtt:
+                - PagerDutyToPostgresLambda
+                - Arn
+            Id: PagerDutyToPostgresLambda
